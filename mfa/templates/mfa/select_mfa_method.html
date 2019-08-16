@@ -1,0 +1,16 @@
+{% extends "mfa/base.html" %}
+
+{% block card_title %}Select Second Verification Method{% endblock %}
+{% block card_classes %}card-login mx-auto{% endblock %}
+
+{% block content %}
+{% for method in request.session.mfa_methods %}
+<a class="btn btn-block btn-primary" href="{% url "mfa_goto" method %}">
+{% if method == "TOTP" %}Authenticator App
+{% elif method == "Email" %}Send OTP by Email
+{% elif method == "U2F" %}Secure Key
+{% elif method == "FIDO2" %}FIDO2 Secure Key
+{% endif %}
+→ </a>
+{% endfor %}
+{% endblock %}

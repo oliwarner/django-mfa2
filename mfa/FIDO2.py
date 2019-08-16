@@ -1,40 +1,59 @@
+from django.template.context_processors import csrf
+from django.views.decorators.csrf import csrf_exempt
+from django.http import HttpResponse, JsonResponse
+from django.conf import settings
+from django.utils import timezone
+
+from fido2 import cbor
 from fido2.client import ClientData
 from fido2.server import Fido2Server, RelyingParty
 from fido2.ctap2 import AttestationObject, AuthenticatorData
-from django.template.context_processors import csrf
-from django.views.decorators.csrf import csrf_exempt
-from django.shortcuts import render
-#from django.template.context import RequestContext
-import simplejson
-from fido2 import cbor
-from django.http import HttpResponse
-from django.conf import settings
-from .models import *
-from fido2.utils import websafe_decode,websafe_encode
+from fido2.utils import websafe_decode, websafe_encode
 from fido2.ctap2 import AttestedCredentialData
+
+from .models import UserKey
 from .views import login
-import datetime
-from django.utils import timezone
+from .common import next_check, render
+
+
+def start(request):
+    return render(request, "mfa/FIDO2/add.html", {
+        **csrf(request),
+        'mode': 'auth',
+    })
+
+
+def auth(request):
+    return render(request, "mfa/FIDO2/check.html", {
+        **csrf(request),
+        'mode': 'auth'
+    })
+
 
 def recheck(request):
-    context = csrf(request)
-    context["mode"]="recheck"
-    return request("FIDO2/recheck.html", context)
+    return render(request, "mfa/FIDO2/check.html", {
+        **csrf(request),
+        "mode": "recheck",
+    })
 
 
-def getServer():
+def get_server():
     rp = RelyingParty(settings.FIDO_SERVER_ID, settings.FIDO_SERVER_NAME)
     return Fido2Server(rp)
+
+
 def begin_registeration(request):
-    server = getServer()
+    server = get_server()
     registration_data, state = server.register_begin({
-        u'id': request.user.username.encode("utf8"),
-        u'name': (request.user.first_name + " " + request.user.last_name),
-        u'displayName': request.user.username,
-    }, getUserCredentials(request.user.username))
+        'id': request.user.get_username().encode("utf8"),
+        'name': (request.user.get_full_name()),
+        'displayName': request.user.get_username(),
+    }, get_user_credentials(request.user.get_username()))
     request.session['fido_state'] = state
 
-    return HttpResponse(cbor.encode(registration_data),content_type='application/octet-stream')
+    return HttpResponse(cbor.encode(registration_data), content_type='application/octet-stream')
+
+
 @csrf_exempt
 def complete_reg(request):
     try:
@@ -42,51 +61,48 @@ def complete_reg(request):
 
         client_data = ClientData(data['clientDataJSON'])
         att_obj = AttestationObject((data['attestationObject']))
-        server = getServer()
+        server = get_server()
         auth_data = server.register_complete(
             request.session['fido_state'],
             client_data,
             att_obj
         )
         encoded = websafe_encode(auth_data.credential_data)
-        uk=User_Keys()
-        uk.username = request.user.username
-        uk.properties = {"device":encoded,"type":att_obj.fmt,}
-        uk.key_type = "FIDO2"
-        uk.save()
-        return HttpResponse(simplejson.dumps({'status': 'OK'}))
-    except Exception as exp:
-        from raven.contrib.django.raven_compat.models import client
-        import traceback
-        client.captureException()
-        return HttpResponse(simplejson.dumps({'status': 'ERR',"message":"Error on server, please try again later"}))
-def start(request):
-    context = csrf(request)
-    return render(request,"FIDO2/Add.html", context)
+        UserKey.objects.create(
+            username=request.user.get_username(),
+            properties={"device": encoded, "type": att_obj.fmt},
+            key_type="FIDO2",
+        )
+        return JsonResponse({'status': 'OK'})
 
-def getUserCredentials(username):
+    except:
+        return JsonResponse({
+            'status': 'ERR',
+            "message": "Error on server, please try again later",
+        })
+
+
+def get_user_credentials(username):
     credentials = []
-    for uk in User_Keys.objects.filter(username = username, key_type = "FIDO2"):
+    for uk in UserKey.objects.filter(username=username, key_type="FIDO2"):
         credentials.append(AttestedCredentialData(websafe_decode(uk.properties["device"])))
     return credentials
 
-def auth(request):
-    context=csrf(request)
-    return render(request,"FIDO2/Auth.html",context)
 
 def authenticate_begin(request):
-    server = getServer()
-    credentials=getUserCredentials(request.session.get("base_username",request.user.username))
+    server = get_server()
+    credentials = get_user_credentials(request.session.get("base_username", request.user.get_username()))
     auth_data, state = server.authenticate_begin(credentials)
     request.session['fido_state'] = state
-    return HttpResponse(cbor.encode(auth_data),content_type="application/octet-stream")
+    return HttpResponse(cbor.encode(auth_data), content_type="application/octet-stream")
+
 
 @csrf_exempt
 def authenticate_complete(request):
     credentials = []
-    username=request.session.get("base_username",request.user.username)
-    server=getServer()
-    credentials=getUserCredentials(username)
+    username = request.session.get("base_username", request.user.get_username())
+    server = get_server()
+    credentials = get_user_credentials(username)
     data = cbor.decode(request.body)
     credential_id = data['credentialId']
     client_data = ClientData(data['clientDataJSON'])
@@ -101,17 +117,16 @@ def authenticate_complete(request):
         auth_data,
         signature
     )
-    keys = User_Keys.objects.filter(username=username, key_type="FIDO2",enabled=1)
-    import random
-    for k in keys:
+
+    for k in UserKey.objects.filter(username=username, key_type="FIDO2", enabled=1):
         if AttestedCredentialData(websafe_decode(k.properties["device"])).credential_id == cred.credential_id:
             k.last_used = timezone.now()
             k.save()
-            mfa = {"verified": True, "method": "FIDO2",'id':k.id}
+            mfa = {"verified": True, "method": "FIDO2", 'id': k.id}
             if getattr(settings, "MFA_RECHECK", False):
-                mfa["next_check"] = int((datetime.datetime.now()+ datetime.timedelta(
-                seconds=random.randint(settings.MFA_RECHECK_MIN, settings.MFA_RECHECK_MAX))).strftime("%s"))
+                mfa["next_check"] = next_check()
             request.session["mfa"] = mfa
-            res=login(request)
-            return HttpResponse(simplejson.dumps({'status':"OK","redirect":res["location"]}),content_type="application/json")
-    return HttpResponse(simplejson.dumps({'status': "err"}),content_type="application/json")
+            res = login(request)
+            return JsonResponse({'status': "OK", "redirect": res["location"]})
+
+    return JsonResponse({'status': "err"})

@@ -1,90 +1,97 @@
-from django.shortcuts import render
-#from django.http import HttpResponse,HttpResponseRedirect
-from .models import *
-try:
-    from django.urls import reverse
-except:
-    from django.core.urlresolvers import reverse
-from django.template.context_processors import csrf
-from django.template.context import RequestContext
-from django.http import HttpResponseRedirect
+from django.shortcuts import redirect
+from django.http import HttpResponse
 from django.conf import settings
-from . import TrustedDevice
 from user_agents import parse
+from django.utils.module_loading import import_string
+
+from .models import UserKey
+from .common import render
+
+
 def index(request):
-    keys=[]
-    context={"keys":User_Keys.objects.filter(username=request.user.username),"UNALLOWED_AUTHEN_METHODS":settings.MFA_UNALLOWED_METHODS
-             ,"HIDE_DISABLE":getattr(settings,"MFA_HIDE_DISABLE",[])}
-    for k in context["keys"]:
-        if k.key_type =="Trusted Device" :
-            setattr(k,"device",parse(k.properties.get("user_agent","-----")))
+    context = {
+        "keys": [],
+        "UNALLOWED_AUTHEN_METHODS": settings.MFA_UNALLOWED_METHODS,
+        "HIDE_DISABLE": getattr(settings, "MFA_HIDE_DISABLE", [])
+    }
+
+    for k in UserKey.objects.filter(username=request.user.get_username()):
+        if k.key_type == "Trusted Device":
+            k.device = parse(k.properties.get("user_agent", "-----"))
         elif k.key_type == "FIDO2":
-            setattr(k,"device",k.properties.get("type","----"))
-        keys.append(k)
-    context["keys"]=keys
-    return render(request,"MFA.html",context)
+            k.device = k.properties.get("type", "----")
+        context["keys"].append(k)
 
-def verify(request,username):
+    return render(request, "mfa/home.html", context)
+
+
+def verify(request, username):
     request.session["base_username"] = username
-    #request.session["base_password"] = password
-    keys=User_Keys.objects.filter(username=username,enabled=1)
-    methods=list(set([k.key_type for k in keys]))
+    keys = UserKey.objects.filter(username=username, enabled=1)
+    methods = list(set([k.key_type for k in keys]))
 
-    if "Trusted Device" in methods and not request.session.get("checked_trusted_device",False):
-        if TrustedDevice.verify(request):
-            return login(request)
-        methods.remove("Trusted Device")
     request.session["mfa_methods"] = methods
-    if len(methods)==1:
-        return HttpResponseRedirect(reverse(methods[0].lower()+"_auth"))
+    if len(methods) == 1:
+        return redirect(methods[0].lower() + "_auth")
+
     return show_methods(request)
 
+
 def show_methods(request):
-    return render(request,"select_mfa_method.html", {})
+    username = request.user.get_username()
+    request.session["base_username"] = request.user.get_username()
+    keys = UserKey.objects.filter(username=username, enabled=1)
+    methods = list(set([k.key_type for k in keys]))
+
+    request.session["mfa_methods"] = methods
+    if len(methods) == 1:
+        return redirect(methods[0].lower() + "_auth")
+
+    return render(request, "mfa/select_mfa_method.html", {})
+
 
 def reset_cookie(request):
-    response=HttpResponseRedirect(settings.LOGIN_URL)
+    del request.session['mfa']
+    response = redirect(settings.LOGIN_URL)
     response.delete_cookie("base_username")
     return response
-def login(request):
-    from django.contrib import auth
-    from django.conf import settings
-    callable_func = __get_callable_function__(settings.MFA_LOGIN_CALLBACK)
-    return callable_func(request,username=request.session["base_username"])
 
-def delKey(request):
-    key=User_Keys.objects.get(id=request.GET["id"])
-    if key.username == request.user.username:
+
+def login(request):
+    request.session['mfa-verified'] = True
+
+    if 'mfa-next' in request.session:
+        return redirect(request.session['mfa-next'])
+
+    callback = getattr(settings, 'MFA_LOGIN_CALLBACK', False)
+    if callback:
+        callable_func = import_string(settings.MFA_LOGIN_CALLBACK)
+        return callable_func(request, username=request.session["base_username"])
+
+    return redirect(settings.LOGIN_URL)
+
+
+def del_key(request):
+    key = UserKey.objects.get(id=request.GET["id"])
+    if key.username == request.user.get_username():
         key.delete()
         return HttpResponse("Deleted Successfully")
     else:
         return HttpResponse("Error: You own this token so you can't delete it")
 
-def __get_callable_function__(func_path):
-    import importlib
-    if not '.' in func_path:
-        raise Exception("class Name should include modulename.classname")
 
-    parsed_str = func_path.split(".")
-    module_name , func_name = ".".join(parsed_str[:-1]) , parsed_str[-1]
-    imported_module = importlib.import_module(module_name)
-    callable_func = getattr(imported_module,func_name)
-    if not callable_func:
-        raise Exception("Module does not have requested function")
-    return callable_func
+def toggle_key(request):
+    key_id = request.GET["id"]
+    q = UserKey.objects.filter(username=request.user.get_username(), id=key_id)
 
-def toggleKey(request):
-    id=request.GET["id"]
-    q=User_Keys.objects.filter(username=request.user.username, id=id)
-    if q.count()==1:
-        key=q[0]
-        key.enabled=not key.enabled
+    if q.count() == 1:
+        key = q[0]
+        key.enabled = not key.enabled
         key.save()
         return HttpResponse("OK")
     else:
         return HttpResponse("Error")
 
-def goto(request,method):
-    return HttpResponseRedirect(reverse(method.lower()+"_auth"))
 
-
+def goto(request, method):
+    return redirect(method.lower() + "_auth")

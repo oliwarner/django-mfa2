@@ -1,0 +1,114 @@
+{% extends "mfa/base.html" %}
+{% load static %}
+
+{% block card_title %}Multifactor Authentication{% endblock %}
+{% block card_classes %}{% endblock %}
+
+{% block content %}
+<div class="btn-group mb-4 ml-4 float-right">
+	<button class="btn btn-success dropdown-toggle" data-toggle="dropdown">
+		Add Method&nbsp;<span class="caret"></span>
+	</button>
+	<div class="dropdown-menu dropdown-menu-right">
+		{% if not 'TOTP' in UNALLOWED_AUTHEN_METHODS %}
+			<a class="dropdown-item" href="{% url 'start_new_otop' %}">Authenticator app</a>
+		{% endif %}
+		{% if not 'Email' in UNALLOWED_AUTHEN_METHODS %}
+			<a class="dropdown-item" href="{% url 'start_email' %}">Email Token</a>
+		{% endif %}
+		{% if not 'U2F' in UNALLOWED_AUTHEN_METHODS %}
+			<a class="dropdown-item" href="{% url 'start_u2f' %}">Security Key</a>
+		{% endif %}
+		{% if not 'FIDO2' in UNALLOWED_AUTHEN_METHODS %}
+			<a class="dropdown-item" href="{% url 'start_fido2' %}">FIDO2 Security Key</a>
+		{% endif %}
+	</div>
+</div>
+
+<p>To keep your account secure, you can add one or more secondary authentication factors. These are commonly USB keys, or codes acquired through a secure mechanism like an authenticator. </p>
+
+<table class="table table-striped mb-0">
+	<thead>
+		<tr>
+			<th>Type</th>
+			<th>Added</th>
+			<th>Expires</th>
+			<th>Last Used</th>
+			<th></th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for key in keys %}
+		<tr>
+			<td class="align-middle">
+				<strong>{{ key.key_type }}</strong>
+				{% if key.device %}<br><small>{{ key.device }}</small>{% endif %}
+			</td>
+			<td class="align-middle">{{ key.added_on }}</td>
+			<td class="align-middle">{{ key.expires|default:"Never" }}</td>
+			<td class="align-middle">{{ key.last_used|default:"Never" }}</td>
+			<td class="align-middle" style="width:10%;white-space: nowrap;">
+				{% if key.key_type in HIDE_DISABLE %}
+				{{ key.enabled|yesno:"Enabled,Disabled" }}
+				{% else %}
+				<input type="checkbox" value="{{key.id}}" {{key.enabled|yesno:'checked,'}} data-onstyle="success" data-offstyle="danger" data-toggle="toggle" class="status_chk">
+				{% endif %}
+		   		{% if key.key_type in HIDE_DISABLE %}
+			   	----
+				{% else %}
+				<a class="btn btn-danger" href="javascript:void(0)" onclick="deleteKey({{ key.id }}, '{{ key.key_type }}')">Delete</a>
+				{% endif %}
+			</td>
+		</tr>
+		{% empty %}
+		<tr>
+			<td colspan="5" align="center">You don't have any keys yet, please add one.</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% include "mfa/modal.html" %}
+{% endblock %}
+
+
+{% block head %}
+<link href="{% static 'mfa/css/bootstrap-toggle.min.css' %}" rel="stylesheet">
+<script src="{% static 'mfa/js/bootstrap-toggle.min.js' %}"></script>
+<style>.toggle-handle {background:#ddd}</style>
+
+<script type="text/javascript">
+	function confirmDel(id) {
+		$.ajax({
+			url: "{% url 'mfa_del_key' %}",
+			data: {"id":id},
+			success: function (data) {
+				alert(data);
+				window.location.reload();
+			}
+		})
+	}
+
+	function deleteKey(id, name) {
+		$("#modal-title").html("Confirm Delete")
+		$("#modal-body").html("Are you sure you want to delete '"+name+"'? you may lose access to your system if this your only 2FA.");
+		$("#actionBtn").remove()
+		$("#modal-footer").prepend("<button id='actionBtn' class='btn btn-danger' onclick='confirmDel("+id+")'>Confirm Deletion</button>")
+		$("#popUpModal").modal()
+	}
+
+	$("body").on('change', '.status_chk', function(ev) {
+		$.ajax({
+			url: "{% url 'toggle_key' %}?id=" + $(this).val(),
+			success: function (data) {
+				console.log(data)
+				if (data == "Error")
+					$(this).toggle()
+			},
+			error: function (data) {
+				$(this).toggle()
+			}
+		})
+	});
+
+</script>
+{% endblock %}

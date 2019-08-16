@@ -1,5 +1,10 @@
 # Change Log
 
+## v 2.0
+  * PEPping up the codebase
+  * A lot more cleaning to happen
+  * Dumping MySQL requirement for Postgres
+
 ## v 1.6.0
   * Fixed some issues for django>= 2.0
   * Added example app.
